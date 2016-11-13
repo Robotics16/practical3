@@ -9,12 +9,12 @@ startPos = 0.0
 
 def drawParticles(particles):
     offset = 300   # Offset used to draw on a sensible location on the screen
-    print "drawParticles:" + str([(x + offset, y + offset, th) for ((x, y, th), w) in particles])
+    print "drawParticles:" + str([(x + offset, y + offset, th, w) for ((x, y, th), w) in particles])
 
 def updateParticlesForward(particles, d):
-    """Update all particles with d cm forward motion, 
+    """Update all particles with d cm forward motion,
     based on current theta for each."""
-    
+
     for i in range(0, len(particles)):
         updatedParticle = updateOneParticleForward(particles[i], d)
         particles[i] = updatedParticle
@@ -41,47 +41,47 @@ def updateOneParticleForward(particle, d):
 
     e = random.gauss(mu, math.sqrt((sigma_offset ** 2) * d / 10)) # error term for coordinate offset
     f = random.gauss(mu, sigma_rotation) # error term for rotation
-    
+
     particle = ((old_x + (d + e) * math.cos(old_theta),
                  old_y + (d + e) * math.sin(old_theta),
-                 old_theta + f), 
+                 old_theta + f),
                 w) # TODO keep angle between -pi and pi
-    
+
     return particle
 
 def updateOneParticleRotate(particle, angle):
     """Update particle triple with angle radians rotation,
     use gaussian distribution with mu=0 and estimated sigma"""
     ((old_x, old_y, old_theta), w) = particle
-                
+
     sigma_rotation_90 = 0.1 # estimated sigma for 90 degrees
     mu = 0
-    
+
     sigma_rotation = math.sqrt((sigma_rotation_90 ** 2) * abs(angle) / (math.pi / 2.0)) # scaled sigma based on the estimation and the actual angle
     g = random.gauss(mu, sigma_rotation) # error term for pure rotation
-    
+
     particle = ((old_x, old_y, old_theta + angle + g), w) # TODO keep angle between -pi and pi
-    return particle 
+    return particle
 
 
 def getCurrentLocation(particles):
-    """Given all particles returns an estimate of the 
+    """Given all particles returns an estimate of the
     current position (x, y, theta)"""
     estimates = [(x * weight, y * weight, theta * weight) for ((x, y, theta), weight) in particles]
     x_estimate     = sum([e[0] for e in estimates])
     y_estimate     = sum([e[1] for e in estimates])
     theta_estimate = sum([e[2] for e in estimates])
-    
+
     return (x_estimate, y_estimate, theta_estimate)
 
 def navigateToWaypoint(w_x, w_y, particles, interface, motors):
     """Using the current location returned by getCurrentLocation()
-    navigates the robot to (w_x, w_y) (coordinates in the Wold coordinate system)"""  
+    navigates the robot to (w_x, w_y) (coordinates in the Wold coordinate system)"""
     (x, y, theta) = getCurrentLocation(particles)
-    
+
     # Get vector between current and next position
     (d_x, d_y) = (w_x - x, w_y - y)
-    
+
     # Turn on the spot in the direction of the waypoint
     alpha = math.atan2(d_y, d_x) # absolute orientation needed (using atan2 so that the result is between -pi and pi)
     beta  = (alpha - theta) # angle to turn
@@ -94,7 +94,7 @@ def navigateToWaypoint(w_x, w_y, particles, interface, motors):
     motor_util.rotate(-beta, interface, motors)
     particles = updateParticlesRotate(particles, beta)
     print "Waypoint navigate: Rotate: " + str(beta)
-    
+
     # Move straight forward to waypoint
     distance_to_move = math.sqrt(d_x ** 2 + d_y ** 2) # distance to move using the Pythagorean theorem
     print "Waypoint navigate: go: " + str(distance_to_move)
@@ -104,8 +104,64 @@ def navigateToWaypoint(w_x, w_y, particles, interface, motors):
     (x, y, theta) = getCurrentLocation(particles)
     print "Current loc: " + str((x - startPos, y - startPos, theta))
 
-    
-def main():  
+
+def updateParticlesWithSonar(particles, measured_distance, map_geometry):
+    """Updates all particle weights given the sonar measurement.
+    Also normalizes and resamples the particle set"""
+
+    for i in range(0, len(particles)):
+        updatedParticle = updateOneParticleWithSonar(particles[i], measured_distance, map_geometry)
+        particles[i] = updatedParticle
+
+    particles = normalize_particles(particles)
+    particles = resample_particles(particles)
+
+    return particles
+
+def updateOneParticleWithSonar(particle, measured_distance, map_geometry):
+    """Updates a single particle weight based on the sonar measurement"""
+    (pos, w) = particle
+    w = w * calculate_likelihood(pos, measured_distance, map_geometry)
+    particle = (pos, w)
+    return particle
+
+def calculate_likelihood(position, measured_distance, map_geometry):
+    """Returns the probability of measuring `measured_distance` given the current
+    position in the map"""
+    # TODO
+    return 1
+
+def normalize_particles(particles):
+    """Normalizes particle set, such that the weights of all particles add up to 1"""
+    total_weight = sum([w for (pos, w) in particles])
+    particles = [(pos, w / total_weight) for (pos, w) in particles]
+    return particles
+
+def resample_particles(particles):
+    """Resamples normalized particle set: samples len(particles) number of particles from
+    the provided particle set, where the chance of picking a particle during a sampling is the
+    weight of the particle"""
+
+    # Create cumulative weight array (representing the cdf of the distribution)
+    num_particles = len(particles)
+    cdf = [0 for _ in range(num_particles)]
+    cdf[0] = particles[0][1] # init 0th element to be the weight of the 0th particle
+    # iterate over cumulative_weight_array,
+    # set each element to the prev element + weight of the corresponding particle in the particle set
+    for i in range(1, num_particles):
+        cdf[i] = cdf[i - 1] + particles[i][1]
+
+    # Sample num_particles elements using the cdf and put them in the `resampled` array
+    sampled_particles = []
+    for _ in range(num_particles):
+        r = random.random()
+        sampled_index = max([i for (i, c) in enumerate(cdf) if c <= r])
+        sampled_particles.append(particles[sampled_index])
+
+    particles = sampled_particles
+    return sampled_particles
+
+def main():
     interface = brickpi.Interface()
     #interface.startLogging('logfile.txt')
     interface.initialize()
@@ -123,7 +179,7 @@ def main():
     # Setup initial state of particles
     numberOfParticles = 100
     particles = [((startPos, startPos, 0), 1 / float(numberOfParticles)) for i in range(numberOfParticles)]
-    
+
     # Go in squares
 
     for i in range(4):
