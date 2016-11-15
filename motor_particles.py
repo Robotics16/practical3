@@ -38,12 +38,13 @@ def updateOneParticleForward(particle, d):
     use gaussian distribution with mu = 0 and estimated sigma"""
     ((old_x, old_y, old_theta), w) = particle
 
-    sigma_offset   = 0.05   # estimated sigma for 10 cms (scaled with variance for longer distances) TODO
-    sigma_rotation = 0.05
+    sigma_offset   = 0.02            # estimated sigma for 10 cms (scaled with variance for longer distances) TODO
+    sigma_rotation = 0.1  #0.100    # about 15 degrees for 114 cms
+    sigma_rotation_scaled = sigma_rotation #math.sqrt((sigma_rotation ** 2) * d / 114)
     mu = 0
 
     e = random.gauss(mu, math.sqrt((sigma_offset ** 2) * d / 10)) # error term for coordinate offset
-    f = random.gauss(mu, sigma_rotation) # error term for rotation
+    f = random.gauss(mu, sigma_rotation_scaled) # error term for rotation
 
     particle = ((old_x + (d + e) * math.cos(old_theta),
                  old_y + (d + e) * math.sin(old_theta),
@@ -57,10 +58,10 @@ def updateOneParticleRotate(particle, angle):
     use gaussian distribution with mu=0 and estimated sigma"""
     ((old_x, old_y, old_theta), w) = particle
 
-    sigma_rotation_90 = 0.1 # estimated sigma for 90 degrees
+    sigma_rotation_90 = 0.05  # estimated sigma for 90 degrees
     mu = 0
 
-    sigma_rotation = math.sqrt((sigma_rotation_90 ** 2) * abs(angle) / (math.pi / 2.0)) # scaled sigma based on the estimation and the actual angle
+    sigma_rotation = sigma_rotation_90 #math.sqrt((sigma_rotation_90 ** 2) * abs(angle) / (math.pi / 2.0)) # scaled sigma based on the estimation and the actual angle
     g = random.gauss(mu, sigma_rotation) # error term for pure rotation
 
     particle = ((old_x, old_y, old_theta + angle + g), w)
@@ -71,9 +72,12 @@ def getCurrentLocation(particles):
     """Given all particles returns an estimate of the
     current position (x, y, theta)"""
     estimates = [(x * weight, y * weight, theta * weight) for ((x, y, theta), weight) in particles]
-    x_estimate     = sum([e[0] for e in estimates])
-    y_estimate     = sum([e[1] for e in estimates])
-    theta_estimate = sum([e[2] for e in estimates])
+    
+    total_weight = sum([weight for ((x, y, theta), weight) in particles])
+    
+    x_estimate     = sum([e[0] for e in estimates]) / total_weight
+    y_estimate     = sum([e[1] for e in estimates]) / total_weight
+    theta_estimate = sum([e[2] for e in estimates]) / total_weight
 
     return (x_estimate, y_estimate, theta_estimate)
 
@@ -96,21 +100,28 @@ def navigateToWaypoint(w_x, w_y, particles, interface, motors):
 
     motor_util.rotate(-beta, interface, motors)
     particles = updateParticlesRotate(particles, beta)
+    drawParticles(particles)
     print "Waypoint navigate: Rotate: " + str(beta)
+
+    sonar_value = getSonarValue(interface)
+    particles = updateparticleswithsonar(particles, sonar_value, mymap)
+    drawParticles(particles)
+
 
     # Move straight forward to waypoint
     distance_to_move = math.sqrt(d_x ** 2 + d_y ** 2) # distance to move using the Pythagorean theorem
     print "Waypoint navigate: go: " + str(distance_to_move)
     motor_util.forward(distance_to_move, interface, motors)
     particles = updateParticlesForward(particles, distance_to_move)
+    drawParticles(particles)
 
     # take sonar measurements (take 5 get median)
     sonar_value = getSonarValue(interface)
 
     # update probabilities with sonar distance
     particles = updateparticleswithsonar(particles, sonar_value, mymap)
+    drawParticles(particles)
 
-    (x, y, theta) = getCurrentLocation(particles)
     return particles
 
 
@@ -124,10 +135,10 @@ def getSonarValue(interface):
 
     while (length > 0):
         if usReading :
-        	data_list.append(usReading[0])
-        #	print usReading
+            data_list.append(usReading[0])
+        #    print usReading
         else:
-        	print "Failed US reading"
+            print "Failed US reading"
 
         length = length - 1
 
@@ -135,6 +146,8 @@ def getSonarValue(interface):
     data_list.sort()
     sonar_value = (data_list[4] + data_list[5]) / 2
 
+    print sonar_value
+    
     return sonar_value
 
 
@@ -154,6 +167,10 @@ def updateparticleswithsonar(particles, measured_distance, map_geometry):
 def updateOneParticleWithSonar(particle, measured_distance, map_geometry):
     """Updates a single particle weight based on the sonar measurement"""
     (pos, w) = particle
+    
+    if (measured_distance > 100):
+        return particle
+    
     w = w * calculate_likelihood(pos, measured_distance, map_geometry)
     particle = (pos, w)
     return particle
@@ -169,11 +186,23 @@ def calculate_likelihood(position, measured_distance, map_geometry):
     for wall in walls:
         (a_x, a_y, b_x, b_y) = wall
         m = ((b_y - a_y) * (a_x - x) - (b_x - a_x) * (a_y - y)) / ((b_y - a_y) * math.cos(theta) - (b_x - a_x) * math.sin(theta))
-        distances_wall.append(m)
+        (intersection_x, intersection_y) = (x + m*math.cos(theta), y + m*math.sin(theta))
 
-    minimum_distance = min([x for x in distances_wall if x >= 0])
-    sigma = 0.1 #sonar error TODO
-    k = 0.1 #balint const TODO
+        is_between_x = (a_x <= intersection_x and intersection_x <= b_x) or (b_x <= intersection_x and intersection_x <= a_x)
+        is_between_y = (a_y <= intersection_y and intersection_y <= b_y) or (b_y <= intersection_y and intersection_y <= a_y)
+
+        if (is_between_x and is_between_y):
+            distances_wall.append(m)
+
+
+    greater_than_0_distances = [x for x in distances_wall if x >= 0]
+
+    if not greater_than_0_distances:
+        return 0
+
+    minimum_distance = min(greater_than_0_distances)
+    sigma = 0.3 # sonar error
+    k = 0.001 # const to "lift" bell curve with
 
     dis_err = (measured_distance-minimum_distance)**2
     probability = math.exp(-dis_err/(2*sigma**2)) + k # p(z|m) + k
@@ -219,24 +248,38 @@ def main():
 
     # Setup initial state of particles
     numberOfParticles = 100
-    particles = [((startPos, startPos, 0), 1 / float(numberOfParticles)) for i in range(numberOfParticles)]
+    waypoint1_x = 84
+    waypoint1_y = 30
+    particles = [((waypoint1_x, waypoint1_y, 0), 1 / float(numberOfParticles)) for i in range(numberOfParticles)]
+
+    drawParticles(particles)
 
     # Go in squares
 
-    for i in range(4):
-        for j in range(4):
-            motor_util.forward(10, interface, motors)
-            drawParticles(particles)
-            time.sleep(0.25)
-            particles = updateParticlesForward(particles, 20)
-            drawParticles(particles)
-            time.sleep(0.25)
-        motor_util.rotateRight90deg(interface, motors)
-        particles = updateParticlesRotate(particles, -math.pi/2)
-        drawParticles(particles)
-        time.sleep(0.25)
+    # for i in range(4):
+    #     for j in range(4):
+    #         motor_util.forward(10, interface, motors)
+    #         drawParticles(particles)
+    #         time.sleep(0.25)
+    #         particles = updateParticlesForward(particles, 20)
+    #         drawParticles(particles)
+    #         time.sleep(0.25)
+    #     motor_util.rotateRight90deg(interface, motors)
+    #     particles = updateParticlesRotate(particles, -math.pi/2)
+    #     drawParticles(particles)
+    #     time.sleep(0.25)
 
-    print "Destination reached!"
+    # print "Destination reached!"
+
+    # Assume robot at waypoint 0 : (84, 30)
+    particles = navigateToWaypoint(180, 30, particles, interface, motors)  # 1
+    particles = navigateToWaypoint(180, 54, particles, interface, motors)  # 2
+    particles = navigateToWaypoint(138, 54, particles, interface, motors)  # 3
+    particles = navigateToWaypoint(138, 168, particles, interface, motors) # 4
+    particles = navigateToWaypoint(114, 168, particles, interface, motors) # 5
+    particles = navigateToWaypoint(114, 84, particles, interface, motors)  # 6
+    particles = navigateToWaypoint(84, 84, particles, interface, motors)   # 7
+    particles = navigateToWaypoint(84, 30, particles, interface, motors)   # 8
 
     #interface.stopLogging('logfile.txt')
     interface.terminate()
