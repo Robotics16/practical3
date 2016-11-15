@@ -4,12 +4,15 @@ import motor_util
 import sys
 import random
 import math
+import numpy as np
+from particleDataStructuresExample import mymap, canvas
 
 startPos = 0.0
 
 def drawParticles(particles):
-    offset = 300   # Offset used to draw on a sensible location on the screen
-    print "drawParticles:" + str([(x + offset, y + offset, th, w) for ((x, y, th), w) in particles])
+    # offset = 300   # Offset used to draw on a sensible location on the screen
+    # print "drawParticles:" + str([(x + offset, y + offset, th, w) for ((x, y, th), w) in particles])
+    canvas.drawParticles([(x, y, th, w) for ((x, y, th), w) in particles])
 
 def updateParticlesForward(particles, d):
     """Update all particles with d cm forward motion,
@@ -45,7 +48,7 @@ def updateOneParticleForward(particle, d):
     particle = ((old_x + (d + e) * math.cos(old_theta),
                  old_y + (d + e) * math.sin(old_theta),
                  old_theta + f),
-                w) # TODO keep angle between -pi and pi
+                w)
 
     return particle
 
@@ -60,7 +63,7 @@ def updateOneParticleRotate(particle, angle):
     sigma_rotation = math.sqrt((sigma_rotation_90 ** 2) * abs(angle) / (math.pi / 2.0)) # scaled sigma based on the estimation and the actual angle
     g = random.gauss(mu, sigma_rotation) # error term for pure rotation
 
-    particle = ((old_x, old_y, old_theta + angle + g), w) # TODO keep angle between -pi and pi
+    particle = ((old_x, old_y, old_theta + angle + g), w)
     return particle
 
 
@@ -101,11 +104,41 @@ def navigateToWaypoint(w_x, w_y, particles, interface, motors):
     motor_util.forward(distance_to_move, interface, motors)
     particles = updateParticlesForward(particles, distance_to_move)
 
+    # take sonar measurements (take 5 get median)
+    sonar_value = getSonarValue(interface)
+
+    # update probabilities with sonar distance
+    particles = updateparticleswithsonar(particles, sonar_value, mymap)
+
     (x, y, theta) = getCurrentLocation(particles)
-    print "Current loc: " + str((x - startPos, y - startPos, theta))
+    return particles
 
 
-def updateParticlesWithSonar(particles, measured_distance, map_geometry):
+def getSonarValue(interface):
+    port = 3 # port which ultrasoic sensor is plugged in to
+    interface.sensorEnable(port, brickpi.SensorType.SENSOR_ULTRASONIC)
+    usReading = interface.getSensorValue(port)
+
+    data_list = []
+    length = 10
+
+    while (length > 0):
+        if usReading :
+        	data_list.append(usReading[0])
+        #	print usReading
+        else:
+        	print "Failed US reading"
+
+        length = length - 1
+
+
+    data_list.sort()
+    sonar_value = (data_list[4] + data_list[5]) / 2
+
+    return sonar_value
+
+
+def updateparticleswithsonar(particles, measured_distance, map_geometry):
     """Updates all particle weights given the sonar measurement.
     Also normalizes and resamples the particle set"""
 
@@ -128,8 +161,24 @@ def updateOneParticleWithSonar(particle, measured_distance, map_geometry):
 def calculate_likelihood(position, measured_distance, map_geometry):
     """Returns the probability of measuring `measured_distance` given the current
     position in the map"""
-    # TODO
-    return 1
+
+    (x, y, theta) = position
+    walls = map_geometry.walls
+    distances_wall = []
+
+    for wall in walls:
+        (a_x, a_y, b_x, b_y) = wall
+        m = ((b_y - a_y) * (a_x - x) - (b_x - a_x) * (a_y - y)) / ((b_y - a_y) * math.cos(theta) - (b_x - a_x) * math.sin(theta))
+        distances_wall.append(m)
+
+    minimum_distance = min([x for x in distances_wall if x >= 0])
+    sigma = 0.1 #sonar error TODO
+    k = 0.1 #balint const TODO
+
+    dis_err = (measured_distance-minimum_distance)**2
+    probability = math.exp(-dis_err/(2*sigma**2)) + k # p(z|m) + k
+
+    return probability
 
 def normalize_particles(particles):
     """Normalizes particle set, such that the weights of all particles add up to 1"""
@@ -142,24 +191,16 @@ def resample_particles(particles):
     the provided particle set, where the chance of picking a particle during a sampling is the
     weight of the particle"""
 
-    # Create cumulative weight array (representing the cdf of the distribution)
-    num_particles = len(particles)
-    cdf = [0 for _ in range(num_particles)]
-    cdf[0] = particles[0][1] # init 0th element to be the weight of the 0th particle
-    # iterate over cumulative_weight_array,
-    # set each element to the prev element + weight of the corresponding particle in the particle set
-    for i in range(1, num_particles):
-        cdf[i] = cdf[i - 1] + particles[i][1]
+    pdf = [w for (p,w) in particles]
+    indices = list(np.random.choice(len(particles), len(particles), p=pdf))
 
-    # Sample num_particles elements using the cdf and put them in the `resampled` array
-    sampled_particles = []
-    for _ in range(num_particles):
-        r = random.random()
-        sampled_index = max([i for (i, c) in enumerate(cdf) if c <= r])
-        sampled_particles.append(particles[sampled_index])
+    out = []
 
-    particles = sampled_particles
-    return sampled_particles
+    for i in indices:
+        out.append(particles[i])
+
+    particles = out
+    return out
 
 def main():
     interface = brickpi.Interface()
